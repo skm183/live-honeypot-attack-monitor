@@ -1,0 +1,64 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700;800&family=Outfit:wght@400;500;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-bg-dark: #0a0e14;
+  --color-accent-red: #ff3e3e;
+  --color-accent-cyan: #00f2ff;
+  --color-border-custom: #1a2332;
+  --color-surface-custom: #111827;
+}
+
+/* Custom global overrides */
+html, body, #root {
+  background-color: #0a0e14;
+  color: #e2e8f0;
+  font-family: var(--font-sans);
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow-x: hidden;
+}
+
+/* Leaflet Popups Cyber-Theme Overrides */
+.leaflet-popup-content-wrapper {
+  background: #111827 !important;
+  color: #e2e8f0 !important;
+  border: 1px solid #1a2332 !important;
+  border-radius: 8px !important;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.7) !important;
+  font-family: "JetBrains Mono", monospace !important;
+}
+
+.leaflet-popup-tip {
+  background: #111827 !important;
+  border-left: 1px solid #1a2332 !important;
+  border-bottom: 1px solid #1a2332 !important;
+}
+
+.leaflet-container a.leaflet-popup-close-button {
+  color: #94a3b8 !important;
+  padding: 4px 6px 0 0 !important;
+}
+
+/* Elegant scrollbar styling for terminal and logs */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 10px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
