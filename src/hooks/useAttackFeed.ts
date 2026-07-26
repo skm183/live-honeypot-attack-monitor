@@ -24,15 +24,19 @@ export interface HoneypotStats {
   malwareCount: number;
 }
 
-// Global geolocation state
-let geoCache = new Map<string, { country: string; countryCode: string; lat: number; lon: number }>();
+// Aggressive cache with common country fallbacks
+const geoCache = new Map<string, { country: string; countryCode: string; lat: number; lon: number }>();
+
+// Geolocation request queue (rate limited)
 let geoQueue: string[] = [];
 let isProcessingGeo = false;
-let useRealGeolocation = false; // ← Toggle this in console!
-const MAX_GEO_REQUESTS_PER_SECOND = 10;
+const MAX_GEO_REQUESTS_PER_SECOND = 2; // SLOW DOWN to avoid 403s
 const GEO_REQUEST_DELAY = Math.floor(1000 / MAX_GEO_REQUESTS_PER_SECOND);
 
-// Common attacker countries (for instant random fallback)
+// DEFAULT TO RANDOM MODE - only enable real geo on demand
+let failedAPIs = new Set<string>(['ip-api.com', 'ipinfo.io', 'geoip-db.com']); // Start with all APIs "failed" to use random
+
+// Common attacker countries (pre-loaded fallbacks)
 const FALLBACK_LOCATIONS: Record<string, { country: string; countryCode: string; lat: number; lon: number }> = {
   'RU': { country: 'Russia', countryCode: 'RU', lat: 55.7558, lon: 37.6173 },
   'CN': { country: 'China', countryCode: 'CN', lat: 39.9042, lon: 116.4074 },
@@ -67,85 +71,84 @@ function getRandomFallback() {
   return FALLBACK_LOCATIONS[keys[Math.floor(Math.random() * keys.length)]];
 }
 
-// Fetch real geolocation
-async function fetchGeoSingle(ip: string): Promise<{ country: string; countryCode: string; lat: number; lon: number } | null> {
-  try {
-    const response = await fetch(`https://ip-api.com/json/${ip}?fields=country,countryCode,lat,lon`, {
-      signal: AbortSignal.timeout(2000)
-    });
-    
-    if (response.ok) {
-      const data = await response.json();
-      if (data.status === "success") {
-        return {
-          country: data.country,
-          countryCode: data.countryCode,
-          lat: data.lat,
-          lon: data.lon
-        };
+// Try multiple geolocation APIs
+async function fetchGeoWithFallbacks(ip: string): Promise<{ country: string; countryCode: string; lat: number; lon: number } | null> {
+  // API 1: ip-api.com (try first if not marked failed)
+  if (!failedAPIs.has('ip-api.com')) {
+    try {
+      const response = await fetch(`https://ip-api.com/json/${ip}?fields=country,countryCode,lat,lon`, {
+        signal: AbortSignal.timeout(3000)
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        if (data.status === "success") {
+          console.log(`[Geo] ip-api.com: ${ip} → ${data.country}`);
+          return {
+            country: data.country,
+            countryCode: data.countryCode,
+            lat: data.lat,
+            lon: data.lon
+          };
+        }
+      } else if (response.status === 403 || response.status === 429) {
+        console.warn(`[Geo] ip-api.com rate limited (${response.status}), switching to fallback`);
+        failedAPIs.add('ip-api.com');
       }
+    } catch (e) {
+      console.warn(`[Geo] ip-api.com failed: ${e instanceof Error ? e.message : 'unknown'}`);
     }
-  } catch (e) {
-    // Silently fail
   }
 
-  // Fallback to ipinfo.io
-  try {
-    const response = await fetch(`https://ipinfo.io/${ip}/json`, {
-      signal: AbortSignal.timeout(2000)
-    });
-    
-    if (response.ok) {
-      const data = await response.json();
-      const [lat, lon] = (data.loc || '0,0').split(',').map(Number);
-      return {
-        country: data.country || 'Unknown',
-        countryCode: data.country || 'XX',
-        lat: lat || 0,
-        lon: lon || 0
-      };
+  // API 2: ipinfo.io (more generous free tier)
+  if (!failedAPIs.has('ipinfo.io')) {
+    try {
+      const response = await fetch(`https://ipinfo.io/${ip}/json`, {
+        signal: AbortSignal.timeout(3000)
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        const [lat, lon] = (data.loc || '0,0').split(',').map(Number);
+        console.log(`[Geo] ipinfo.io: ${ip} → ${data.country}`);
+        return {
+          country: data.country_name || data.country || 'Unknown',
+          countryCode: data.country || 'XX',
+          lat: lat || 0,
+          lon: lon || 0
+        };
+      } else if (response.status === 403 || response.status === 429) {
+        console.warn(`[Geo] ipinfo.io rate limited (${response.status}), using fallback`);
+        failedAPIs.add('ipinfo.io');
+      }
+    } catch (e) {
+      console.warn(`[Geo] ipinfo.io failed: ${e instanceof Error ? e.message : 'unknown'}`);
     }
-  } catch (e) {
-    // Both APIs failed
+  }
+
+  // API 3: geoip-db.com (another free option)
+  if (!failedAPIs.has('geoip-db.com')) {
+    try {
+      const response = await fetch(`https://geoip-db.com/json/${ip}`, {
+        signal: AbortSignal.timeout(3000)
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`[Geo] geoip-db.com: ${ip} → ${data.country_name}`);
+        return {
+          country: data.country_name || 'Unknown',
+          countryCode: data.country_code || 'XX',
+          lat: data.latitude || 0,
+          lon: data.longitude || 0
+        };
+      }
+    } catch (e) {
+      console.warn(`[Geo] geoip-db.com failed`);
+    }
   }
 
   return null;
-}
-
-// Start global geolocation processor
-let geoProcessorInterval: NodeJS.Timeout | null = null;
-
-function startGeoProcessor() {
-  if (geoProcessorInterval) return;
-  
-  geoProcessorInterval = setInterval(async () => {
-    if (isProcessingGeo || geoQueue.length === 0) return;
-    
-    isProcessingGeo = true;
-    const ip = geoQueue.shift();
-    
-    if (!ip) {
-      isProcessingGeo = false;
-      return;
-    }
-
-    if (geoCache.has(ip)) {
-      isProcessingGeo = false;
-      return;
-    }
-
-    const geo = await fetchGeoSingle(ip);
-    
-    if (geo) {
-      geoCache.set(ip, geo);
-      console.log(`[Geo] Resolved ${ip} → ${geo.country} (queue: ${geoQueue.length})`);
-    } else {
-      const fallback = getRandomFallback();
-      geoCache.set(ip, fallback);
-    }
-
-    isProcessingGeo = false;
-  }, GEO_REQUEST_DELAY);
 }
 
 function queueGeoLocation(ip: string) {
@@ -176,21 +179,48 @@ async function getGeoLocation(ip: string): Promise<{ country: string; countryCod
     return fallback;
   }
 
-  // If real geolocation is OFF, return random immediately
-  if (!useRealGeolocation) {
-    const fallback = getRandomFallback();
-    geoCache.set(ip, fallback);
-    // Still queue it in background for when it's switched ON
-    queueGeoLocation(ip);
-    return fallback;
-  }
-
-  // Real geolocation is ON - queue for processing
+  // Queue for processing
   queueGeoLocation(ip);
   
   // Return random while real data loads
   const fallback = getRandomFallback();
   return fallback;
+}
+
+// Start global geolocation processor
+let geoProcessorInterval: NodeJS.Timeout | null = null;
+
+function startGeoProcessor() {
+  if (geoProcessorInterval) return;
+  
+  geoProcessorInterval = setInterval(async () => {
+    if (isProcessingGeo || geoQueue.length === 0) return;
+    
+    isProcessingGeo = true;
+    const ip = geoQueue.shift();
+    
+    if (!ip) {
+      isProcessingGeo = false;
+      return;
+    }
+
+    if (geoCache.has(ip)) {
+      isProcessingGeo = false;
+      return;
+    }
+
+    const geo = await fetchGeoWithFallbacks(ip);
+    
+    if (geo) {
+      geoCache.set(ip, geo);
+    } else {
+      const fallback = getRandomFallback();
+      geoCache.set(ip, fallback);
+      console.log(`[Geo] Using fallback for ${ip}`);
+    }
+
+    isProcessingGeo = false;
+  }, GEO_REQUEST_DELAY);
 }
 
 async function enrichCowrieEvent(rawEvent: any): Promise<CowrieEvent | null> {
@@ -234,31 +264,40 @@ async function enrichCowrieEvent(rawEvent: any): Promise<CowrieEvent | null> {
 if (typeof window !== 'undefined') {
   (window as any).honeypot = {
     enableRealGeo: () => {
-      useRealGeolocation = true;
+      // Re-enable APIs that were failing
+      failedAPIs.clear();
       console.log(`Real geolocation ENABLED (${geoCache.size} cached, ${geoQueue.length} queued)`);
     },
     disableRealGeo: () => {
-      useRealGeolocation = false;
       console.log(`Real geolocation DISABLED - using random fallback`);
     },
     toggleGeo: () => {
-      useRealGeolocation = !useRealGeolocation;
-      console.log(`${useRealGeolocation ? 'ENABLED' : 'DISABLED'} - Cached: ${geoCache.size}, Queued: ${geoQueue.length}`);
+      if (failedAPIs.size === 0) {
+        failedAPIs.add('ip-api.com');
+        failedAPIs.add('ipinfo.io');
+        console.log(`DISABLED - Cached: ${geoCache.size}, Queued: ${geoQueue.length}`);
+      } else {
+        failedAPIs.clear();
+        console.log(`ENABLED - Cached: ${geoCache.size}, Queued: ${geoQueue.length}`);
+      }
     },
     status: () => {
+      const modeText = failedAPIs.size === 0 ? 'REAL GEOLOCATION' : 'RANDOM FALLBACK';
       console.log(`
 🗺️  Geolocation Status:
-  Mode: ${useRealGeolocation ? 'REAL GEOLOCATION' : 'RANDOM FALLBACK'}
+  Mode: ${modeText}
   Cached IPs: ${geoCache.size}
   Queued IPs: ${geoQueue.length}
   Processing: ${isProcessingGeo ? 'Yes' : 'No'}
   Queue Speed: ${MAX_GEO_REQUESTS_PER_SECOND} req/sec
+  Failed APIs: ${failedAPIs.size > 0 ? Array.from(failedAPIs).join(', ') : 'None'}
       `);
     },
     clearCache: () => {
       geoCache.clear();
       geoQueue = [];
-      console.log('🧹 Cache cleared');
+      failedAPIs.clear();
+      console.log('🧹 Cache cleared, all APIs re-enabled');
     }
   };
 }
@@ -270,7 +309,7 @@ export function useAttackFeed() {
     return `${protocol}//${host}/ws`;
   };
 
-  const wsUrl = "wss://skm183.is-a.dev/ws";
+  const wsUrl = "wss:skm183.is-a.dev/ws";
 
   const [events, setEvents] = useState<CowrieEvent[]>([]);
   const [stats, setStats] = useState<HoneypotStats>({
